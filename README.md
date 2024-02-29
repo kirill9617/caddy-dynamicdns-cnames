@@ -175,8 +175,9 @@ Equivalent JSON config; you may omit the other version you want to keep enabled 
 </details>
 
 <details>
-### CNAME
-<summary>To dynamicaly create CNAMEs for subdomain:</summary>
+<summary>CNAME</summary>
+
+To dynamicaly create CNAMEs for subdomain:
 ```
 {
         dynamic_dns {
@@ -199,6 +200,7 @@ another.host.com {
 }
 
 ```
+</details>
 
 <details>
 <summary>Disabling IPv6</summary>
