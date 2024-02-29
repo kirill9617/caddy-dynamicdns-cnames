@@ -114,7 +114,31 @@ Equivalent JSON config:
 	}
 }
 ```
+### CNAME
 
+To dynamicaly create CNAMEs for subdomain:
+```
+{
+        dynamic_dns {
+                provider cloudflare {env.CLOUDFLARE_API_TOKEN}
+                cname {
+			# <DOMAIN> <TARGET>
+			# note trailing dot in TARGET
+                        example.com test.example.com.
+                }
+        }
+}
+# This will produce CNAME record for cool.example.com pointing to test.example.com.
+cool.example.com {
+	redir http://google.com
+}
+
+# This domain will *NOT* be managed because it's not configured in dynamic_dns.
+another.host.com {
+	redir http://youtube.com
+}
+
+```
 
 ### Disabling IPv6
 
