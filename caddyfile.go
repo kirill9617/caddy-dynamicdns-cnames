@@ -32,6 +32,9 @@ func init() {
 //		domains {
 //			<zone> <names...>
 //		}
+//		cname {
+//			<zone> <target>
+//		}
 //		check_interval <duration>
 //		provider <name> ...
 //		ip_source upnp|simple_http <endpoint>
@@ -74,6 +77,26 @@ func parseApp(d *caddyfile.Dispenser, _ interface{}) (interface{}, error) {
 				return nil, d.ArgErr()
 			}
 			app.UpdateOnly = true
+
+		case "cname":
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				zone := d.Val()
+				if zone == "" {
+					return nil, d.ArgErr()
+				}
+				var target string
+				if d.NextArg() {
+					target = d.Val()
+				} else {
+					target = zone
+				}
+
+				if app.CnameTarget == nil {
+					app.CnameTarget = make(map[string]string)
+				}
+				app.CnameTarget[zone] = target
+			}
+			app.Cname = true
 
 		case "dynamic_domains":
 			if d.NextArg() {

@@ -61,6 +61,9 @@ type App struct {
 	// of domains for which to enable dynamic DNS updates.
 	DynamicDomains bool `json:"dynamic_domains,omitempty"`
 
+	Cname       bool `json:"cname,omitempty"`
+	CnameTarget map[string]string
+
 	// The IP versions to enable. By default, both "ipv4" and "ipv6" will be enabled.
 	// To disable IPv6, specify {"ipv6": false}.
 	Versions IPVersions `json:"versions,omitempty"`
@@ -72,7 +75,11 @@ type App struct {
 	TTL caddy.Duration `json:"ttl,omitempty"`
 
 	ipSources   []IPSource
-	dnsProvider libdns.RecordSetter
+	dnsProvider interface {
+		libdns.RecordSetter
+		libdns.RecordGetter
+		libdns.RecordDeleter
+	}
 
 	ctx    caddy.Context
 	logger *zap.Logger
@@ -99,7 +106,11 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading DNS provider module: %v", err)
 	}
-	a.dnsProvider = val.(libdns.RecordSetter)
+	a.dnsProvider = val.(interface {
+		libdns.RecordSetter
+		libdns.RecordGetter
+		libdns.RecordDeleter
+	})
 
 	// set up the IP source module or use a default
 	if a.IPSourcesRaw != nil {
@@ -148,15 +159,147 @@ func (a App) checkerLoop() {
 	defer ticker.Stop()
 
 	a.checkIPAndUpdateDNS()
+	a.updateCNAME()
 
 	for {
 		select {
 		case <-ticker.C:
 			a.checkIPAndUpdateDNS()
+			a.updateCNAME()
 		case <-a.ctx.Done():
 			return
 		}
 	}
+}
+func (a App) updateCNAME() {
+
+	if !a.Cname {
+		return
+	}
+
+	a.logger.Debug("updating cnames")
+	var err error
+
+	m, err := a.lookupManagedDomains()
+	if err != nil {
+		return
+	}
+
+	a.logger.Info("Loaded dynamic domains", zap.Strings("domains", m))
+	//allDomains := make(map[string][]string)
+	// do a diff of current and previous IPs to make DNS records to update
+	updatedRecsByZone := make(map[string][]libdns.Record)
+	deletedRecsByZone := make(map[string][]libdns.Record)
+
+	for zone, target := range a.CnameTarget {
+		var recs []libdns.Record
+		recs, err = a.dnsProvider.GetRecords(a.ctx, zone)
+	IterDomains:
+		for _, domain := range m {
+
+			name, ok := func() (string, bool) {
+				if domain == zone {
+					return "@", true
+				}
+				suffix := "." + zone
+				if n := strings.TrimSuffix(domain, suffix); n != domain {
+					return n, true
+				}
+				return "", false
+			}()
+			if !ok {
+				// Not in this zone.
+				continue IterDomains
+			}
+			oldCname, found := lastCNAMEs[domain]
+			if !found {
+				for _, rec := range recs {
+					if rec.Name == name {
+						if rec.Value == target {
+							if lastCNAMEs == nil {
+								lastCNAMEs = make(map[string]string)
+							}
+							//valid in dns: add to local list
+							lastCNAMEs[domain] = target
+							a.logger.Debug("already ok [DNS]",
+								zap.String("zone", zone),
+								zap.String("name", name),
+								zap.String("target", target),
+							)
+							continue IterDomains
+						} else {
+							//need to be changed
+							deletedRecsByZone[zone] = append(deletedRecsByZone[zone], rec)
+						}
+					}
+
+				}
+			} else {
+				if oldCname == target {
+					a.logger.Debug("already ok [LOCAL]",
+						zap.String("zone", zone),
+						zap.String("name", name),
+						zap.String("target", target),
+					)
+				}
+				continue IterDomains
+			}
+
+			updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Record{
+				Type:  recordTypeCNAME,
+				Name:  domain,
+				Value: target,
+				TTL:   time.Duration(a.TTL),
+			})
+			a.logger.Debug("managed record",
+				zap.String("zone", zone),
+				zap.String("name", name),
+				zap.String("target", target),
+				zap.String("type", recordTypeCNAME),
+			)
+		}
+	}
+	if len(updatedRecsByZone) == 0 {
+		a.logger.Debug("no CNAMES change; no update needed")
+		return
+	}
+	for zone, records := range deletedRecsByZone {
+		_, err = a.dnsProvider.DeleteRecords(a.ctx, zone, records)
+		if err != nil {
+			a.logger.Error("failed deleting DNS record(s)",
+				zap.String("zone", zone),
+				zap.Error(err),
+			)
+		}
+	}
+	for zone, records := range updatedRecsByZone {
+		for _, rec := range records {
+			a.logger.Info("updating DNS record",
+				zap.String("zone", zone),
+				zap.String("type", rec.Type),
+				zap.String("name", rec.Name),
+				zap.String("value", rec.Value),
+				zap.Duration("ttl", rec.TTL),
+			)
+		}
+
+		_, err = a.dnsProvider.SetRecords(a.ctx, zone, records)
+		if err != nil {
+			a.logger.Error("failed setting DNS record(s)",
+				zap.String("zone", zone),
+				zap.Error(err),
+			)
+		}
+		for _, rec := range records {
+			name := joinDomainZone(rec.Name, zone)
+			if lastCNAMEs == nil {
+				lastCNAMEs = make(map[string]string)
+			}
+			lastCNAMEs[name] = rec.Value
+		}
+	}
+
+	a.logger.Info("finished updating cnames")
 }
 
 // checkIPAndUpdateDNS checks public IP addresses and, for any IP addresses
@@ -170,6 +313,9 @@ func (a App) checkIPAndUpdateDNS() {
 	var err error
 
 	allDomains := a.allDomains()
+	if len(allDomains) == 0 {
+		return
+	}
 
 	// if we don't know current IPs, look them up from DNS
 	if lastIPs == nil {
@@ -442,13 +588,15 @@ var (
 	lastIPs   domainTypeIPs
 	lastIPsMu sync.Mutex
 
+	lastCNAMEs map[string]string
 	// Special value indicate there is a new domain to manage.
 	nilIP net.IP
 )
 
 const (
-	recordTypeA    = "A"
-	recordTypeAAAA = "AAAA"
+	recordTypeA     = "A"
+	recordTypeAAAA  = "AAAA"
+	recordTypeCNAME = "CNAME"
 )
 
 const defaultCheckInterval = 30 * time.Minute
