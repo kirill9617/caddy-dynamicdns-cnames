@@ -188,7 +188,7 @@ func (a App) updateCNAME() {
 	a.logger.Info("Loaded dynamic domains", zap.Strings("domains", m))
 	//allDomains := make(map[string][]string)
 	// do a diff of current and previous IPs to make DNS records to update
-	updatedRecsByZone := make(map[string][]libdns.Record)
+	updatedRecsByZone := make(map[string][]libdns.Address)
 	deletedRecsByZone := make(map[string][]libdns.Record)
 
 	for zone, target := range a.CnameTarget {
@@ -245,7 +245,7 @@ func (a App) updateCNAME() {
 				continue IterDomains
 			}
 
-			updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Record{
+			updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Address{
 				Type:  recordTypeCNAME,
 				Name:  domain,
 				Value: target,
